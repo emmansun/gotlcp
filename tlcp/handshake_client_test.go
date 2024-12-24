@@ -147,7 +147,7 @@ func Test_clientHandshake_no_auth(t *testing.T) {
 
 func Test_clientHandshake_no_auth_with_sdf(t *testing.T) {
 	go func() {
-		if err := server(8444); err != nil {
+		if err := server(8453); err != nil {
 			panic(err)
 		}
 	}()
@@ -159,7 +159,7 @@ func Test_clientHandshake_no_auth_with_sdf(t *testing.T) {
 
 func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
 	go func() {
-		if err := serverWithSDF(8444); err != nil {
+		if err := serverWithSDF(8454); err != nil {
 			panic(err)
 		}
 	}()
@@ -171,7 +171,7 @@ func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
 
 func Test_clientHandshake_no_auth_with_both_sdf(t *testing.T) {
 	go func() {
-		if err := serverWithSDF(8444); err != nil {
+		if err := serverWithSDF(8456); err != nil {
 			panic(err)
 		}
 	}()

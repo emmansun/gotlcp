@@ -260,7 +260,7 @@ func cipherSM4(config *Config, key any, iv []byte, isRead bool) interface{} {
 	}
 	keyBytes, ok := key.([]byte)
 	if !ok {
-		panic("tls: internal error: bad key type")
+		panic("tlcp: internal error: bad key type")
 	}
 	block, _ := sm4.NewCipher(keyBytes)
 	if isRead {
@@ -275,7 +275,7 @@ func macSM3(config *Config, key any) hash.Hash {
 	}
 	keyBytes, ok := key.([]byte)
 	if !ok {
-		panic("tls: internal error: bad key type")
+		panic("tlcp: internal error: bad key type")
 	}
 	return hmac.New(sm3.New, keyBytes)
 }
@@ -285,7 +285,7 @@ func macSM3(config *Config, key any) hash.Hash {
 // nonce: 隐式随机数 (implicit nonce 4 Byte)
 func aeadSM4GCM(key []byte, nonce []byte) aead {
 	if len(nonce) != noncePrefixLength {
-		panic("tls: internal error: wrong implicit nonce length")
+		panic("tlcp: internal error: wrong implicit nonce length")
 	}
 	block, err := sm4.NewCipher(key)
 	if err != nil {

@@ -35,6 +35,7 @@ type clientHandshakeState struct {
 	hello            *clientHelloMsg     // 客户端 Hello消息
 	suite            *cipherSuite        // 密码套件实现
 	finishedHash     finishedHash        // 生成结束验证消息
+	preMasterSecret  []byte              // 预主密钥
 	masterSecret     []byte              // 主密钥
 	session          *SessionState       // 会话状态
 	authCert         *Certificate        // 客户端认证密钥对
@@ -423,6 +424,7 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 			return err
 		}
 	}
+	hs.preMasterSecret = preMasterSecret
 	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.hello.random, hs.serverHello.random)
 	hs.finishedHash.discardHandshakeBuffer()
 
@@ -432,18 +434,31 @@ func (hs *clientHandshakeState) doFullHandshake() error {
 func (hs *clientHandshakeState) establishKeys() error {
 	c := hs.c
 
-	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
 	var clientCipher, serverCipher interface{}
 	var clientHash, serverHash hash.Hash
-	if hs.suite.cipher != nil {
-		clientCipher = hs.suite.cipher(clientKey, clientIV, false /* not for reading */)
-		clientHash = hs.suite.mac(clientMAC)
-		serverCipher = hs.suite.cipher(serverKey, serverIV, true /* for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+
+	if c.config.CipherDevice != nil && hs.suite.cipher != nil {
+		clientMAC, serverMAC, clientKey, serverKey, err := c.config.CipherDevice.GenerateWorkingKeys(hs.preMasterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen)
+		if err != nil {
+			return err
+		}
+		var iv [16]byte
+		clientCipher = hs.suite.cipher(c.config, clientKey, iv[:], false /* not for reading */)
+		clientHash = hs.suite.mac(c.config, clientMAC)
+		serverCipher = hs.suite.cipher(c.config, serverKey, iv[:], true /* for reading */)
+		serverHash = hs.suite.mac(c.config, serverMAC)
 	} else {
-		clientCipher = hs.suite.aead(clientKey, clientIV)
-		serverCipher = hs.suite.aead(serverKey, serverIV)
+		clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
+			keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.hello.random, hs.serverHello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+		if hs.suite.cipher != nil {
+			clientCipher = hs.suite.cipher(c.config, clientKey, clientIV, false /* not for reading */)
+			clientHash = hs.suite.mac(c.config, clientMAC)
+			serverCipher = hs.suite.cipher(c.config, serverKey, serverIV, true /* for reading */)
+			serverHash = hs.suite.mac(c.config, serverMAC)
+		} else {
+			clientCipher = hs.suite.aead(clientKey, clientIV)
+			serverCipher = hs.suite.aead(serverKey, serverIV)
+		}
 	}
 
 	c.in.prepareCipherSpec(c.vers, serverCipher, serverHash)
@@ -488,6 +503,7 @@ func (hs *clientHandshakeState) processServerHello() (bool, error) {
 	}
 
 	// 根据会话恢复 会话密钥 以及 证书
+	hs.preMasterSecret = hs.session.preMasterSecret
 	hs.masterSecret = hs.session.masterSecret
 	c.peerCertificates = hs.session.peerCertificates
 	return true, nil
@@ -537,6 +553,7 @@ func (hs *clientHandshakeState) createNewSession() error {
 		sessionId:        hs.serverHello.sessionId,
 		vers:             hs.serverHello.vers,
 		cipherSuite:      hs.serverHello.cipherSuite,
+		preMasterSecret:  hs.preMasterSecret,
 		masterSecret:     hs.masterSecret,
 		createdAt:        time.Now(),
 		peerCertificates: hs.peerCertificates,

@@ -92,8 +92,8 @@ type cipherSuite struct {
 	ka     func(version uint16) keyAgreementProtocol
 	// flags is a bitmask of the suite* values, above.
 	flags  int
-	cipher func(key, iv []byte, isRead bool) interface{}
-	mac    func(key []byte) hash.Hash
+	cipher func(config *Config, key any, iv []byte, isRead bool) interface{}
+	mac    func(config *Config, key any) hash.Hash
 	aead   func(key, fixedNonce []byte) aead
 }
 
@@ -254,16 +254,30 @@ func ecdheKA(version uint16) keyAgreementProtocol {
 	return &sm2ECDHEKeyAgreement{}
 }
 
-func cipherSM4(key, iv []byte, isRead bool) interface{} {
-	block, _ := sm4.NewCipher(key)
+func cipherSM4(config *Config, key any, iv []byte, isRead bool) interface{} {
+	if config.CipherDevice != nil {
+		return config.CipherDevice.CreateCBCCipher(key, iv, isRead)
+	}
+	keyBytes, ok := key.([]byte)
+	if !ok {
+		panic("tls: internal error: bad key type")
+	}
+	block, _ := sm4.NewCipher(keyBytes)
 	if isRead {
 		return cipher.NewCBCDecrypter(block, iv)
 	}
 	return cipher.NewCBCEncrypter(block, iv)
 }
 
-func macSM3(key []byte) hash.Hash {
-	return hmac.New(sm3.New, key)
+func macSM3(config *Config, key any) hash.Hash {
+	if config.CipherDevice != nil {
+		return config.CipherDevice.CreateHMAC(key)
+	}
+	keyBytes, ok := key.([]byte)
+	if !ok {
+		panic("tls: internal error: bad key type")
+	}
+	return hmac.New(sm3.New, keyBytes)
 }
 
 // aeadSM4GCM SM4 GCM向前加解密函数

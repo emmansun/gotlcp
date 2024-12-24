@@ -42,6 +42,7 @@ type serverHandshakeState struct {
 	rsaSignOk        bool                // 密钥状态 支持RSA签名
 	sessionState     *SessionState       // 会话状态
 	finishedHash     finishedHash        // 生成结束验证消息
+	preMasterSecret  []byte              // 预主密钥
 	masterSecret     []byte              // 主密钥
 	sigCert          *Certificate        // 签名证书
 	encCert          *Certificate        // 加密证书
@@ -354,6 +355,7 @@ func (hs *serverHandshakeState) doResumeHandshake() error {
 		}
 	}
 
+	hs.preMasterSecret = hs.sessionState.preMasterSecret
 	hs.masterSecret = hs.sessionState.masterSecret
 
 	return nil
@@ -494,6 +496,7 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 		_ = c.sendAlert(alertHandshakeFailure)
 		return err
 	}
+	hs.preMasterSecret = preMasterSecret
 	hs.masterSecret = masterFromPreMasterSecret(c.vers, hs.suite, preMasterSecret, hs.clientHello.random, hs.hello.random)
 
 	// If we received a client sigCert in response to our certificate request message,
@@ -544,21 +547,32 @@ func (hs *serverHandshakeState) doFullHandshake() error {
 
 func (hs *serverHandshakeState) establishKeys() error {
 	c := hs.c
-
-	clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
-		keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.clientHello.random, hs.hello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
-
 	var clientCipher, serverCipher interface{}
 	var clientHash, serverHash hash.Hash
 
-	if hs.suite.aead == nil {
-		clientCipher = hs.suite.cipher(clientKey, clientIV, true /* for reading */)
-		clientHash = hs.suite.mac(clientMAC)
-		serverCipher = hs.suite.cipher(serverKey, serverIV, false /* not for reading */)
-		serverHash = hs.suite.mac(serverMAC)
+	if hs.suite.cipher != nil && c.config.CipherDevice != nil {
+		clientMAC, serverMAC, clientKey, serverKey, err := c.config.CipherDevice.GenerateWorkingKeys(hs.preMasterSecret, hs.clientHello.random, hs.hello.random, hs.suite.macLen, hs.suite.keyLen)
+		if err != nil {
+			return err
+		}
+		var iv [16]byte
+		clientCipher = hs.suite.cipher(c.config, clientKey, iv[:], true /* for reading */)
+		clientHash = hs.suite.mac(c.config, clientMAC)
+		serverCipher = hs.suite.cipher(c.config, serverKey, iv[:], false /* not for reading */)
+		serverHash = hs.suite.mac(c.config, serverMAC)
 	} else {
-		clientCipher = hs.suite.aead(clientKey, clientIV)
-		serverCipher = hs.suite.aead(serverKey, serverIV)
+		clientMAC, serverMAC, clientKey, serverKey, clientIV, serverIV :=
+			keysFromMasterSecret(c.vers, hs.suite, hs.masterSecret, hs.clientHello.random, hs.hello.random, hs.suite.macLen, hs.suite.keyLen, hs.suite.ivLen)
+
+		if hs.suite.aead == nil {
+			clientCipher = hs.suite.cipher(c.config, clientKey, clientIV, true /* for reading */)
+			clientHash = hs.suite.mac(c.config, clientMAC)
+			serverCipher = hs.suite.cipher(c.config, serverKey, serverIV, false /* not for reading */)
+			serverHash = hs.suite.mac(c.config, serverMAC)
+		} else {
+			clientCipher = hs.suite.aead(clientKey, clientIV)
+			serverCipher = hs.suite.aead(serverKey, serverIV)
+		}
 	}
 
 	c.in.prepareCipherSpec(c.vers, clientCipher, clientHash)
@@ -630,6 +644,7 @@ func (hs *serverHandshakeState) createSessionState() {
 		sessionId:        hs.hello.sessionId,
 		vers:             hs.hello.vers,
 		cipherSuite:      hs.hello.cipherSuite,
+		preMasterSecret:  hs.preMasterSecret,
 		masterSecret:     hs.masterSecret,
 		peerCertificates: hs.peerCertificates,
 		createdAt:        time.Now(),

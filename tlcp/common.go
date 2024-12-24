@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"sync"
@@ -228,8 +229,25 @@ func (c *CertificateRequestInfo) Context() context.Context {
 	return c.ctx
 }
 
+// CipherDevice defines an interface for cryptographic operations required by the TLCP protocol.
+// It includes methods for generating working keys, creating CBC ciphers, and creating HMACs.
+type CipherDevice interface {
+	// GenerateWorkingKeys generates the working keys used for encryption and decryption.
+	// It takes a pre-master key, client and server random values, and lengths for the MAC and keys.
+	GenerateWorkingKeys(preMasterKey any, clientRandom, serverRandom []byte, macLen, keyLen int) (clientMac any, serverMac any, clientKey any, serverKey any, err error)
+
+	// CreateCBCCipher creates a CBC (Cipher Block Chaining) cipher for encryption or decryption.
+	// It takes a key, an initialization vector (IV), and a boolean indicating whether the cipher is for decryption.
+	// It returns the created CBC cipher.
+	CreateCBCCipher(key any, iv []byte, decryption bool) CBCMode
+
+	// CreateHMAC creates an HMAC (Hash-based Message Authentication Code) using the provided key.
+	// It returns the created HMAC hash.Hash.
+	CreateHMAC(key any) hash.Hash
+}
+
 // Config TLCP配置对象，用于配置TLCP客户端或服务端，一旦该参数被TLCP使用，那么
-// 该参数内部的值不应在改变。
+// 该参数内部的值不应再改变。
 //
 // Config 根据情况可以复用。
 type Config struct {
@@ -279,8 +297,11 @@ type Config struct {
 	// 通过该方法你可以在针对该次连接生成自定义的配置对象来完成特殊的应用需要。
 	GetConfigForClient func(*ClientHelloInfo) (*Config, error)
 
+	// CipherDevice represents a cryptographic device used for encryption and decryption operations.
+	CipherDevice CipherDevice
+
 	// VerifyPeerCertificate 【可选】 验证对端证书
-	// 若改参数不为空，将会在客户端或服务端的证书验证结束阶段后被调用。
+	// 若该参数不为空，将会在客户端或服务端的证书验证结束阶段后被调用。
 	//
 	// 该方法接收 rawCerts 对端发来的 原始的 ASN.1（DER） 的证书序列
 	// 以及 verifiedChains 验证该证书相关的根证书链序列
@@ -393,6 +414,7 @@ func (c *Config) Clone() *Config {
 		DynamicRecordSizingDisabled: c.DynamicRecordSizingDisabled,
 		OnAlert:                     c.OnAlert,
 		EnableDebug:                 c.EnableDebug,
+		CipherDevice:                c.CipherDevice,
 	}
 }
 

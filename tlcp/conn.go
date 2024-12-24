@@ -230,7 +230,7 @@ func (hc *halfConn) explicitNonceLen() int {
 		return 0
 	case aead:
 		return c.explicitNonceLen()
-	case cbcMode:
+	case CBCMode:
 		return c.BlockSize()
 	default:
 		panic("unknown cipher type")
@@ -291,8 +291,8 @@ func roundUp(a, b int) int {
 	return a + (b-a%b)%b
 }
 
-// cbcMode is an interface for block ciphers using cipher block chaining.
-type cbcMode interface {
+// CBCMode is an interface for block ciphers using cipher block chaining.
+type CBCMode interface {
 	cipher.BlockMode
 	SetIV([]byte)
 }
@@ -334,7 +334,7 @@ func (hc *halfConn) decrypt(record []byte) ([]byte, recordType, error) {
 			if err != nil {
 				return nil, 0, alertBadRecordMAC
 			}
-		case cbcMode:
+		case CBCMode:
 			blockSize := c.BlockSize()
 			minPayload := explicitNonceLen + roundUp(hc.mac.Size()+1, blockSize)
 			if len(payload)%blockSize != 0 || len(payload) < minPayload {
@@ -417,7 +417,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 	var explicitNonce []byte
 	if explicitNonceLen := hc.explicitNonceLen(); explicitNonceLen > 0 {
 		record, explicitNonce = sliceForAppend(record, explicitNonceLen)
-		if _, isCBC := hc.cipher.(cbcMode); !isCBC && explicitNonceLen < 16 {
+		if _, isCBC := hc.cipher.(CBCMode); !isCBC && explicitNonceLen < 16 {
 			// The AES-GCM construction in TLS has an explicit nonce so that the
 			// nonce can be random. However, the nonce is only 8 bytes which is
 			// too small for a secure, random nonce. Therefore we use the
@@ -450,7 +450,7 @@ func (hc *halfConn) encrypt(record, payload []byte, rand io.Reader) ([]byte, err
 		additionalData := append(hc.scratchBuf[:0], hc.seq[:]...)
 		additionalData = append(additionalData, record[:recordHeaderLen]...)
 		record = c.Seal(record, nonce, payload, additionalData)
-	case cbcMode:
+	case CBCMode:
 		mac := tls10MAC(hc.mac, hc.scratchBuf[:0], hc.seq[:], record[:recordHeaderLen], payload, nil)
 		blockSize := c.BlockSize()
 		plaintextLen := len(payload) + len(mac)
@@ -807,7 +807,7 @@ func (c *Conn) maxPayloadSizeForWrite(typ recordType) int {
 			payloadBytes -= c.out.mac.Size()
 		case cipher.AEAD:
 			payloadBytes -= ciph.Overhead()
-		case cbcMode:
+		case CBCMode:
 			blockSize := ciph.BlockSize()
 			// The payload must fit in a multiple of blockSize, with
 			// room for at least one padding byte.

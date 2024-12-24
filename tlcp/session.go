@@ -12,9 +12,10 @@ package tlcp
 
 import (
 	"container/list"
-	x509 "github.com/emmansun/gmsm/smx509"
 	"sync"
 	"time"
+
+	x509 "github.com/emmansun/gmsm/smx509"
 )
 
 // SessionState 包含了TLCP会话相关的密码参数，用于会话重用
@@ -22,6 +23,7 @@ type SessionState struct {
 	sessionId        []byte              // 会话ID
 	vers             uint16              // TLCP 版本号
 	cipherSuite      uint16              // 握手使用的密码套件ID
+	preMasterSecret  []byte              // 握手协议协商得到的预主密钥
 	masterSecret     []byte              // 握手协议协商得到的主密钥
 	peerCertificates []*x509.Certificate // 对端证书
 	createdAt        time.Time           // Session创建时间

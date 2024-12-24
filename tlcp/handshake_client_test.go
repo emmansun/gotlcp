@@ -1,12 +1,17 @@
 package tlcp
 
 import (
+	"crypto/cipher"
+	"crypto/hmac"
 	"fmt"
+	"hash"
 	"io"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/emmansun/gmsm/sm3"
+	"github.com/emmansun/gmsm/sm4"
 	"github.com/emmansun/gmsm/smx509"
 )
 
@@ -73,6 +78,60 @@ func init() {
 	}
 }
 
+type softwareDeviceAdapter struct {
+}
+
+func (s *softwareDeviceAdapter) GenerateWorkingKeys(preMasterKey any, clientRandom, serverRandom []byte, macLen, keyLen int) (clientMac any, serverMac any, clientKey any, serverKey any, err error) {
+	// master secret
+	seed := make([]byte, 0, len(clientRandom)+len(serverRandom))
+	seed = append(seed, clientRandom...)
+	seed = append(seed, serverRandom...)
+
+	masterSecret := make([]byte, masterSecretLength)
+	preMasterSecretByte, _ := preMasterKey.([]byte)
+	prf12(sm3.New)(masterSecret, preMasterSecretByte, masterSecretLabel, seed)
+
+	// working keys
+	seed1 := make([]byte, 0, len(serverRandom)+len(clientRandom))
+	seed1 = append(seed1, serverRandom...)
+	seed1 = append(seed1, clientRandom...)
+	n := 2*macLen + 2*keyLen
+	keyMaterial := make([]byte, n)
+	prf12(sm3.New)(keyMaterial, masterSecret, keyExpansionLabel, seed1)
+	clientMac = keyMaterial[:macLen]
+	keyMaterial = keyMaterial[macLen:]
+	serverMac = keyMaterial[:macLen]
+	keyMaterial = keyMaterial[macLen:]
+	clientKey = keyMaterial[:keyLen]
+	keyMaterial = keyMaterial[keyLen:]
+	serverKey = keyMaterial[:keyLen]
+
+	return
+}
+
+func (s *softwareDeviceAdapter) CreateCBCCipher(key any, iv []byte, isRead bool) CBCMode {
+	keyBytes, ok := key.([]byte)
+	if !ok {
+		panic("tls: internal error: bad key type")
+	}
+	block, _ := sm4.NewCipher(keyBytes)
+	var m cipher.BlockMode
+	if isRead {
+		m = cipher.NewCBCDecrypter(block, iv)
+	} else {
+		m = cipher.NewCBCEncrypter(block, iv)
+	}
+	return m.(CBCMode)
+}
+
+func (s *softwareDeviceAdapter) CreateHMAC(key any) hash.Hash {
+	keyBytes, ok := key.([]byte)
+	if !ok {
+		panic("tls: internal error: bad key type")
+	}
+	return hmac.New(sm3.New, keyBytes)
+}
+
 // 测试忽略安全验证的客户端握手
 func Test_clientHandshake_no_auth(t *testing.T) {
 	go func() {
@@ -83,6 +142,42 @@ func Test_clientHandshake_no_auth(t *testing.T) {
 	time.Sleep(time.Millisecond * 300)
 
 	config := &Config{InsecureSkipVerify: true}
+	testClientHandshake(t, config, "127.0.0.1:8444")
+}
+
+func Test_clientHandshake_no_auth_with_sdf(t *testing.T) {
+	go func() {
+		if err := server(8444); err != nil {
+			panic(err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 300)
+
+	config := &Config{InsecureSkipVerify: true, CipherDevice: &softwareDeviceAdapter{}, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
+	testClientHandshake(t, config, "127.0.0.1:8444")
+}
+
+func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
+	go func() {
+		if err := serverWithSDF(8444); err != nil {
+			panic(err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 300)
+
+	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
+	testClientHandshake(t, config, "127.0.0.1:8444")
+}
+
+func Test_clientHandshake_no_auth_with_both_sdf(t *testing.T) {
+	go func() {
+		if err := serverWithSDF(8444); err != nil {
+			panic(err)
+		}
+	}()
+	time.Sleep(time.Millisecond * 300)
+
+	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
 	testClientHandshake(t, config, "127.0.0.1:8444")
 }
 
@@ -238,11 +333,13 @@ func testClientHandshake(t *testing.T, config *Config, addr string) {
 func Test_NotResumedSession(t *testing.T) {
 	pool := smx509.NewCertPool()
 	pool.AddCert(root1)
+	errCh := make(chan error, 1)
 	go func() {
 		var err error
 		tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", 20099))
 		if err != nil {
-			t.Fatal(err)
+			errCh <- err
+			return
 		}
 		defer tcpLn.Close()
 		config := &Config{
@@ -254,6 +351,7 @@ func Test_NotResumedSession(t *testing.T) {
 		for {
 			conn, err := tcpLn.Accept()
 			if err != nil {
+				errCh <- err
 				return
 			}
 
@@ -261,13 +359,19 @@ func Test_NotResumedSession(t *testing.T) {
 			err = tlcpConn.Handshake()
 			if err != nil {
 				_ = conn.Close()
+				errCh <- err
 				return
 			}
 			_ = tlcpConn.Close()
 		}
 	}()
 
-	time.Sleep(time.Millisecond * 300)
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 300):
+	}
+
 	config := &Config{
 		RootCAs:      pool,
 		Certificates: []Certificate{authCert},

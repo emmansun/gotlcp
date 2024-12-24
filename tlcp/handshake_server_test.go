@@ -245,11 +245,13 @@ func serverResumeSession(port int) error {
 func Test_ResumedSession(t *testing.T) {
 	pool := smx509.NewCertPool()
 	pool.AddCert(root1)
+	errChan := make(chan error, 1)
 	go func() {
 		var err error
 		tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", 20100))
 		if err != nil {
-			t.Fatal(err)
+			errChan <- err
+			return
 		}
 		defer tcpLn.Close()
 		config := &Config{
@@ -263,6 +265,7 @@ func Test_ResumedSession(t *testing.T) {
 		for {
 			conn, err := tcpLn.Accept()
 			if err != nil {
+				errChan <- err
 				return
 			}
 
@@ -270,25 +273,34 @@ func Test_ResumedSession(t *testing.T) {
 			err = tlcpConn.Handshake()
 			if err != nil {
 				_ = conn.Close()
+				errChan <- err
 				return
 			}
 
 			if tlcpConn.IsClient() {
-				t.Fatalf("Expect server connection type, but not")
+				errChan <- fmt.Errorf("Expect server connection type, but not")
+				return
 			}
 			if len(tlcpConn.PeerCertificates()) == 0 {
-				t.Fatalf("Expect get peer cert, but not")
+				errChan <- fmt.Errorf("Expect get peer cert, but not")
+				return
 			}
 			if first {
 				first = false
 			} else {
 				if !tlcpConn.didResume {
-					t.Fatalf("Expect second connection session resume, but not")
+					errChan <- fmt.Errorf("Expect second connection session resume, but not")
+					return
 				}
 			}
 			_ = tlcpConn.Close()
 		}
 	}()
+	select {
+	case err := <-errChan:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 300):
+	}
 
 	time.Sleep(time.Millisecond * 300)
 	config := &Config{
@@ -308,5 +320,37 @@ func Test_ResumedSession(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = conn.Close()
+	}
+}
+
+func serverWithSDF(port int, suites ...uint16) error {
+	var err error
+	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return err
+	}
+	defer tcpLn.Close()
+	config := &Config{
+		Certificates: []Certificate{sigCert, encCert},
+		CipherDevice: &softwareDeviceAdapter{},
+		Time:         runtimeTime,
+	}
+	if len(suites) > 0 {
+		config.CipherSuites = suites
+	}
+	var conn net.Conn
+	for {
+		conn, err = tcpLn.Accept()
+		if err != nil {
+			return err
+		}
+
+		tlcpConn := Server(conn, config)
+		err = tlcpConn.Handshake()
+		if err != nil {
+			_ = conn.Close()
+			return err
+		}
+		_ = tlcpConn.Close()
 	}
 }

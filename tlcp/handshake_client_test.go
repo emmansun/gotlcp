@@ -87,17 +87,15 @@ func (s *softwareDeviceAdapter) GenerateWorkingKeys(preMasterKey any, clientRand
 	seed = append(seed, clientRandom...)
 	seed = append(seed, serverRandom...)
 
-	masterSecret := make([]byte, masterSecretLength)
 	preMasterSecretByte, _ := preMasterKey.([]byte)
-	prf12(sm3.New)(masterSecret, preMasterSecretByte, masterSecretLabel, seed)
+	masterSecret := prf12(sm3.New)(preMasterSecretByte, masterSecretLabel, seed, masterSecretLength)
 
 	// working keys
 	seed1 := make([]byte, 0, len(serverRandom)+len(clientRandom))
 	seed1 = append(seed1, serverRandom...)
 	seed1 = append(seed1, clientRandom...)
 	n := 2*macLen + 2*keyLen
-	keyMaterial := make([]byte, n)
-	prf12(sm3.New)(keyMaterial, masterSecret, keyExpansionLabel, seed1)
+	keyMaterial := prf12(sm3.New)(masterSecret, keyExpansionLabel, seed1, n)
 	clientMac = keyMaterial[:macLen]
 	keyMaterial = keyMaterial[macLen:]
 	serverMac = keyMaterial[:macLen]
@@ -154,7 +152,7 @@ func Test_clientHandshake_no_auth_with_sdf(t *testing.T) {
 	time.Sleep(time.Millisecond * 300)
 
 	config := &Config{InsecureSkipVerify: true, CipherDevice: &softwareDeviceAdapter{}, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8444")
+	testClientHandshake(t, config, "127.0.0.1:8453")
 }
 
 func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
@@ -166,7 +164,7 @@ func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
 	time.Sleep(time.Millisecond * 300)
 
 	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8444")
+	testClientHandshake(t, config, "127.0.0.1:8454")
 }
 
 func Test_clientHandshake_no_auth_with_both_sdf(t *testing.T) {
@@ -178,7 +176,7 @@ func Test_clientHandshake_no_auth_with_both_sdf(t *testing.T) {
 	time.Sleep(time.Millisecond * 300)
 
 	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8444")
+	testClientHandshake(t, config, "127.0.0.1:8456")
 }
 
 // 测试服务端身份认证

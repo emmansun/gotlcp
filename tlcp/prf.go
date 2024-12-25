@@ -13,9 +13,12 @@ package tlcp
 import (
 	"crypto/hmac"
 	"crypto/sha256"
-	"github.com/emmansun/gmsm/sm3"
 	"hash"
+
+	"github.com/emmansun/gmsm/sm3"
 )
+
+type prfFunc func(secret []byte, label string, seed []byte, keyLen int) []byte
 
 // pHash implements the P_hash function, as defined in RFC 4346, Section 5.
 func pHash(result, secret, seed []byte, hash func() hash.Hash) {
@@ -39,13 +42,15 @@ func pHash(result, secret, seed []byte, hash func() hash.Hash) {
 }
 
 // prf12 implements the TLS 1.2 pseudo-random function, as defined in RFC 5246, Section 5.
-func prf12(hashFunc func() hash.Hash) func(result, secret, label, seed []byte) {
-	return func(result, secret, label, seed []byte) {
+func prf12(hashFunc func() hash.Hash) prfFunc {
+	return func(secret []byte, label string, seed []byte, kenLen int) []byte {
 		labelAndSeed := make([]byte, len(label)+len(seed))
 		copy(labelAndSeed, label)
 		copy(labelAndSeed[len(label):], seed)
 
+		result := make([]byte, kenLen)
 		pHash(result, secret, labelAndSeed, hashFunc)
+		return result
 	}
 }
 
@@ -54,12 +59,12 @@ const (
 	finishedVerifyLength = 12 // Length of verify_data in a Finished message.
 )
 
-var masterSecretLabel = []byte("master secret")
-var keyExpansionLabel = []byte("key expansion")
-var clientFinishedLabel = []byte("client finished")
-var serverFinishedLabel = []byte("server finished")
+const masterSecretLabel = "master secret"
+const keyExpansionLabel = "key expansion"
+const clientFinishedLabel = "client finished"
+const serverFinishedLabel = "server finished"
 
-func prfAndHashForVersion(version uint16, suite *cipherSuite) (func(result, secret, label, seed []byte), func() hash.Hash) {
+func prfAndHashForVersion(version uint16, suite *cipherSuite) (prfFunc, func() hash.Hash) {
 	switch version {
 	case VersionTLCP:
 		switch suite.id {
@@ -85,7 +90,7 @@ func prfAndHashForVersion(version uint16, suite *cipherSuite) (func(result, secr
 	}
 }
 
-func prfForVersion(version uint16, suite *cipherSuite) func(result, secret, label, seed []byte) {
+func prfForVersion(version uint16, suite *cipherSuite) prfFunc {
 	prf, _ := prfAndHashForVersion(version, suite)
 	return prf
 }
@@ -98,9 +103,7 @@ func masterFromPreMasterSecret(version uint16, suite *cipherSuite, preMasterSecr
 	seed = append(seed, clientRandom...)
 	seed = append(seed, serverRandom...)
 
-	masterSecret := make([]byte, masterSecretLength)
-	prfForVersion(version, suite)(masterSecret, preMasterSecret, masterSecretLabel, seed)
-	return masterSecret
+	return prfForVersion(version, suite)(preMasterSecret, masterSecretLabel, seed, masterSecretLength)
 }
 
 // keysFromMasterSecret 生成 工作密钥
@@ -112,8 +115,7 @@ func keysFromMasterSecret(version uint16, suite *cipherSuite, masterSecret, clie
 	seed = append(seed, clientRandom...)
 
 	n := 2*macLen + 2*keyLen + 2*ivLen
-	keyMaterial := make([]byte, n)
-	prfForVersion(version, suite)(keyMaterial, masterSecret, keyExpansionLabel, seed)
+	keyMaterial := prfForVersion(version, suite)(masterSecret, keyExpansionLabel, seed, n)
 	clientMAC = keyMaterial[:macLen]
 	keyMaterial = keyMaterial[macLen:]
 	serverMAC = keyMaterial[:macLen]
@@ -144,7 +146,7 @@ type finishedHash struct {
 	msgHash hash.Hash
 
 	version uint16
-	prf     func(result, secret, label, seed []byte)
+	prf     prfFunc
 }
 
 func (h *finishedHash) Write(msg []byte) (n int, err error) {
@@ -160,17 +162,13 @@ func (h finishedHash) Sum() []byte {
 // clientSum returns the contents of the verify_data member of a client's
 // Finished message.
 func (h finishedHash) clientSum(masterSecret []byte) []byte {
-	out := make([]byte, finishedVerifyLength)
-	h.prf(out, masterSecret, clientFinishedLabel, h.Sum())
-	return out
+	return h.prf(masterSecret, clientFinishedLabel, h.Sum(), finishedVerifyLength)
 }
 
 // serverSum returns the contents of the verify_data member of a server's
 // Finished message.
 func (h finishedHash) serverSum(masterSecret []byte) []byte {
-	out := make([]byte, finishedVerifyLength)
-	h.prf(out, masterSecret, serverFinishedLabel, h.Sum())
-	return out
+	return h.prf(masterSecret, serverFinishedLabel, h.Sum(), finishedVerifyLength)
 }
 
 // discardHandshakeBuffer is called when there is no more need to

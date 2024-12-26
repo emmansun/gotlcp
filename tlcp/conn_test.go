@@ -1,6 +1,8 @@
 package tlcp
 
 import (
+	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -22,7 +24,7 @@ func BenchmarkHandshake(b *testing.B) {
 	b.ReportAllocs()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			conn, err := Dial("tcp", "127.0.0.1:38443", &Config{RootCAs: simplePool})
+			conn, err := Dial("tcp", "127.0.0.1:38443", &Config{RootCAs: simplePool, Time: runtimeTime})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -34,4 +36,35 @@ func BenchmarkHandshake(b *testing.B) {
 			_ = conn.Close()
 		}
 	})
+}
+
+// 启动TLCP服务端
+func server(port int, suites ...uint16) error {
+	var err error
+	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return err
+	}
+	defer tcpLn.Close()
+	config := &Config{
+		Certificates: []Certificate{sigCert, encCert},
+		Time:         runtimeTime,
+	}
+	if len(suites) > 0 {
+		config.CipherSuites = suites
+	}
+	var conn net.Conn
+	for {
+		conn, err = tcpLn.Accept()
+		if err != nil {
+			return err
+		}
+
+		tlcpConn := Server(conn, config)
+		defer tlcpConn.Close()
+		err = tlcpConn.Handshake()
+		if err != nil {
+			return err
+		}
+	}
 }

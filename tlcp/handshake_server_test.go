@@ -102,158 +102,21 @@ func runtimeTime() time.Time {
 	return res
 }
 
-/*
-func Test_serverHandshake(t *testing.T) {
-	err := server(8443)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-func Test_serverHandshake_auth(t *testing.T) {
-	err := serverNeedAuth(8442)
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
-// 重用握手测试
-func Test_doResumeHandshake(t *testing.T) {
-	var err error
-
-	config := &Config{
-		Certificates: []Certificate{sigCert, encCert},
-		SessionCache: NewLRUSessionCache(2),
-	}
-
-	ln, err := Listen("tcp", fmt.Sprintf(":%d", 8447), config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "hello tlcp!")
-	})
-	svr := http.Server{}
-	err = svr.Serve(ln)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-}
-*/
-// 启动TLCP服务端
-func server(port int, suites ...uint16) error {
-	var err error
-	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return err
-	}
-	defer tcpLn.Close()
-	config := &Config{
-		Certificates: []Certificate{sigCert, encCert},
-		Time:         runtimeTime,
-	}
-	if len(suites) > 0 {
-		config.CipherSuites = suites
-	}
-	var conn net.Conn
-	for {
-		conn, err = tcpLn.Accept()
-		if err != nil {
-			return err
-		}
-
-		tlcpConn := Server(conn, config)
-		err = tlcpConn.Handshake()
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		_ = tlcpConn.Close()
-	}
-}
-
-// 启动TLCP服务端 要求客户端进行身份认证
-func serverNeedAuth(port int) error {
-	var err error
-	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return err
-	}
-	defer tcpLn.Close()
-	config := &Config{
-		Certificates: []Certificate{sigCert, encCert},
-		ClientAuth:   RequireAndVerifyClientCert,
-		ClientCAs:    simplePool,
-		Time:         runtimeTime,
-	}
-	var conn net.Conn
-	for {
-		conn, err = tcpLn.Accept()
-		if err != nil {
-			return err
-		}
-
-		tlcpConn := Server(conn, config)
-		err = tlcpConn.Handshake()
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		_ = tlcpConn.Close()
-	}
-}
-
-// 启用支持握手重用的服务端
-func serverResumeSession(port int) error {
-	var err error
-	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return err
-	}
-	defer tcpLn.Close()
-	config := &Config{
-		Certificates: []Certificate{sigCert, encCert},
-		SessionCache: NewLRUSessionCache(10),
-	}
-	data := []byte{
-		0, 1, 2, 3,
-		0, 1, 2, 3,
-		0, 1, 2, 3,
-		0, 1, 2, 3,
-	}
-	var conn net.Conn
-	for {
-		conn, err = tcpLn.Accept()
-		if err != nil {
-			return err
-		}
-
-		tlcpConn := Server(conn, config)
-		err = tlcpConn.Handshake()
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		_, _ = tlcpConn.Write(data)
-
-		_ = tlcpConn.Close()
-	}
-}
-
 // 测试握手重用
 func Test_ResumedSession(t *testing.T) {
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tcpLn, err = net.Listen("tcp6", "[::1]:0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpLn.Close()
+
 	pool := smx509.NewCertPool()
 	pool.AddCert(root1)
 	errChan := make(chan error, 1)
 	go func() {
-		var err error
-		tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", 20100))
-		if err != nil {
-			errChan <- err
-			return
-		}
-		defer tcpLn.Close()
 		config := &Config{
 			ClientCAs:    pool,
 			ClientAuth:   RequireAndVerifyClientCert,
@@ -270,6 +133,7 @@ func Test_ResumedSession(t *testing.T) {
 			}
 
 			tlcpConn := Server(conn, config)
+			defer tlcpConn.Close()
 			err = tlcpConn.Handshake()
 			if err != nil {
 				_ = conn.Close()
@@ -293,16 +157,8 @@ func Test_ResumedSession(t *testing.T) {
 					return
 				}
 			}
-			_ = tlcpConn.Close()
 		}
 	}()
-	select {
-	case err := <-errChan:
-		t.Fatal(err)
-	case <-time.After(time.Millisecond * 300):
-	}
-
-	time.Sleep(time.Millisecond * 300)
 	config := &Config{
 		RootCAs:      pool,
 		Certificates: []Certificate{authCert},
@@ -311,7 +167,7 @@ func Test_ResumedSession(t *testing.T) {
 	}
 
 	for i := 0; i < 2; i++ {
-		conn, err := Dial("tcp", "127.0.0.1:20100", config)
+		conn, err := Dial(tcpLn.Addr().Network(), tcpLn.Addr().String(), config)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -321,36 +177,9 @@ func Test_ResumedSession(t *testing.T) {
 		}
 		_ = conn.Close()
 	}
-}
-
-func serverWithSDF(port int, suites ...uint16) error {
-	var err error
-	tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		return err
-	}
-	defer tcpLn.Close()
-	config := &Config{
-		Certificates: []Certificate{sigCert, encCert},
-		CipherDevice: &softwareDeviceAdapter{},
-		Time:         runtimeTime,
-	}
-	if len(suites) > 0 {
-		config.CipherSuites = suites
-	}
-	var conn net.Conn
-	for {
-		conn, err = tcpLn.Accept()
-		if err != nil {
-			return err
-		}
-
-		tlcpConn := Server(conn, config)
-		err = tlcpConn.Handshake()
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		_ = tlcpConn.Close()
+	select {
+	case err := <-errChan:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 300):
 	}
 }

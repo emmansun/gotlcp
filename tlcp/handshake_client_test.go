@@ -78,6 +78,363 @@ func init() {
 	}
 }
 
+func TestHandShake(t *testing.T) {
+	pool1 := smx509.NewCertPool()
+	pool1.AddCert(root1)
+	// 不匹配的证书
+	pool1.AddCert(zjcaRoot)
+
+	pool := smx509.NewCertPool()
+	pool.AddCert(root1)
+
+	cases := []struct {
+		name         string
+		serverConfig *Config
+		clientConfig *Config
+		wantErr      bool
+		errorMsg     string
+	}{
+		{
+			"no_auth",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				Time:         runtimeTime,
+			},
+			&Config{InsecureSkipVerify: true},
+			false,
+			"",
+		},
+		{
+			"auth server",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				Time:         runtimeTime,
+			},
+			&Config{RootCAs: pool1, Time: runtimeTime},
+			false,
+			"",
+		},
+		{
+			"auth both",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				ClientAuth:   RequireAndVerifyClientCert,
+				ClientCAs:    simplePool,
+				Time:         runtimeTime,
+			},
+			&Config{RootCAs: pool, Certificates: []Certificate{authCert}, Time: runtimeTime},
+			false,
+			"",
+		},
+		{
+			"ECC 套件下客户端传输双证书",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				ClientAuth:   RequireAndVerifyClientCert,
+				ClientCAs:    simplePool,
+				Time:         runtimeTime,
+			},
+			&Config{
+				RootCAs:      pool,
+				Certificates: []Certificate{authCert, authCert},
+				CipherSuites: []uint16{ECC_SM4_GCM_SM3, ECC_SM4_CBC_SM3},
+				Time:         runtimeTime,
+			},
+			false,
+			"",
+		},
+		{
+			"no_auth, client sdf",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				Time:         runtimeTime,
+			},
+			&Config{InsecureSkipVerify: true, CipherDevice: &softwareDeviceAdapter{}, CipherSuites: []uint16{ECC_SM4_CBC_SM3}},
+			false,
+			"",
+		},
+		{
+			"no_auth, server sdf",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				CipherDevice: &softwareDeviceAdapter{},
+				Time:         runtimeTime,
+			},
+			&Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}},
+			false,
+			"",
+		},
+		{
+			"no_auth, both sdf",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				CipherDevice: &softwareDeviceAdapter{},
+				Time:         runtimeTime,
+			},
+			&Config{InsecureSkipVerify: true, CipherDevice: &softwareDeviceAdapter{}, CipherSuites: []uint16{ECC_SM4_CBC_SM3}},
+			false,
+			"",
+		},
+		{
+			"测试客户端无证书，服务端要求证书 1",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				ClientAuth:   RequireAndVerifyClientCert,
+				ClientCAs:    simplePool,
+				Time:         runtimeTime,
+			},
+			&Config{InsecureSkipVerify: true},
+			true,
+			"remote error: tlcp: bad certificate",
+		},
+		{
+			"测试客户端无证书，服务端要求证书 2",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				ClientAuth:   RequireAndVerifyClientCert,
+				ClientCAs:    simplePool,
+				Time:         runtimeTime,
+			},
+			&Config{RootCAs: pool, Time: runtimeTime},
+			true,
+			"remote error: tlcp: bad certificate",
+		},
+		{
+			"ECDH",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				Time:         runtimeTime,
+				CipherSuites: []uint16{ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3},
+			},
+			&Config{
+				RootCAs:      pool,
+				Certificates: []Certificate{authCert, authCert},
+				CipherSuites: []uint16{ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3},
+				Time:         runtimeTime,
+			},
+			false,
+			"",
+		},
+		{
+			"ECDH with ClientECDHEParamsAsVector",
+			&Config{
+				Certificates: []Certificate{sigCert, encCert},
+				Time:         runtimeTime,
+				CipherSuites: []uint16{ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3},
+			},
+			&Config{
+				RootCAs:                   pool,
+				Certificates:              []Certificate{authCert, authCert},
+				CipherSuites:              []uint16{ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3},
+				Time:                      runtimeTime,
+				ClientECDHEParamsAsVector: true,
+			},
+			false,
+			"",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := serve(func(addr net.Addr) {
+				time.Sleep(time.Millisecond * 300)
+				conn, err := Dial(addr.Network(), addr.String(), c.clientConfig)
+				if conn != nil {
+					defer conn.Close()
+				}
+				if err != nil && !c.wantErr {
+					t.Fatalf("case %v, handshake err: %v", c.name, err)
+				}
+				if c.wantErr && (err == nil || err.Error() != c.errorMsg) {
+					t.Fatalf("case %v, expect error %v, but got %v", c.name, c.errorMsg, err)
+				}
+				if err == nil {
+					if err = conn.Handshake(); err != nil {
+						t.Fatalf("case %v, handshake err: %v", c.name, err)
+					}
+				}
+			}, c.serverConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// 测试握手重用
+func Test_resumedSession(t *testing.T) {
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tcpLn, err = net.Listen("tcp6", "[::1]:0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpLn.Close()
+	errCh := make(chan error, 1)
+	go func() {
+		config := &Config{
+			Certificates: []Certificate{sigCert, encCert},
+			SessionCache: NewLRUSessionCache(10),
+		}
+		data := []byte{0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3}
+
+		for {
+			var conn net.Conn
+			var err error
+			conn, err = tcpLn.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			tlcpConn := Server(conn, config)
+			defer tlcpConn.Close()
+			err = tlcpConn.Handshake()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			_, _ = tlcpConn.Write(data)
+		}
+	}()
+	pool := smx509.NewCertPool()
+	pool.AddCert(root1)
+	config := &Config{RootCAs: pool, SessionCache: NewLRUSessionCache(2), Time: runtimeTime}
+
+	buff := make([]byte, 1024)
+	for i := 0; i < 2; i++ {
+		conn, err := Dial(tcpLn.Addr().Network(), tcpLn.Addr().String(), config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		err = conn.Handshake()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := conn.Read(buff)
+		if err != nil && err != io.EOF {
+			t.Fatal(err)
+		}
+		peerCertificates := conn.PeerCertificates()
+		if len(peerCertificates) < 2 {
+			t.Fatal("peerCertificates no found, it should be 2 (sig cert,enc cert)")
+		}
+		fmt.Printf(">> %02X\n", buff[:n])
+	}
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 300):
+	}
+}
+
+// 测试握手重用
+func Test_NotResumedSession(t *testing.T) {
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tcpLn, err = net.Listen("tcp6", "[::1]:0")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcpLn.Close()
+	pool := smx509.NewCertPool()
+	pool.AddCert(root1)
+
+	errCh := make(chan error, 1)
+	go func() {
+		config := &Config{
+			ClientCAs:    pool,
+			ClientAuth:   RequireAndVerifyClientCert,
+			Certificates: []Certificate{sigCert, encCert},
+			Time:         runtimeTime,
+		}
+		for {
+			conn, err := tcpLn.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			tlcpConn := Server(conn, config)
+			defer tlcpConn.Close()
+			err = tlcpConn.Handshake()
+			if err != nil {
+				errCh <- err
+				return
+			}
+		}
+	}()
+
+	config := &Config{
+		RootCAs:      pool,
+		Certificates: []Certificate{authCert},
+		SessionCache: NewLRUSessionCache(2),
+		Time:         runtimeTime,
+	}
+
+	for i := 0; i < 2; i++ {
+		conn, err := Dial(tcpLn.Addr().Network(), tcpLn.Addr().String(), config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		err = conn.Handshake()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !conn.IsClient() {
+			t.Fatalf("Expect client connection type, but not")
+		}
+		if len(conn.PeerCertificates()) == 0 {
+			t.Fatalf("Expect get peer cert, but not")
+		}
+		if conn.didResume {
+			t.Fatalf("Expect disable resume, but not")
+		}
+	}
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 300):
+	}
+}
+
+func serve(fn func(addr net.Addr), config *Config, suites ...uint16) error {
+	tcpLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		tcpLn, err = net.Listen("tcp6", "[::1]:0")
+	}
+	if err != nil {
+		return err
+	}
+	defer tcpLn.Close()
+
+	if len(suites) > 0 {
+		config.CipherSuites = suites
+	}
+	go func(config *Config) {
+		for {
+			conn, err := tcpLn.Accept()
+			if err != nil {
+				continue
+			}
+
+			tlcpConn := Server(conn, config)
+			defer tlcpConn.Close()
+			err = tlcpConn.Handshake()
+			if err != nil {
+				_ = conn.Close()
+				continue
+			}
+		}
+	}(config)
+	fn(tcpLn.Addr())
+	return nil
+}
+
 type softwareDeviceAdapter struct {
 }
 
@@ -128,294 +485,4 @@ func (s *softwareDeviceAdapter) CreateHMAC(key any) hash.Hash {
 		panic("tls: internal error: bad key type")
 	}
 	return hmac.New(sm3.New, keyBytes)
-}
-
-// 测试忽略安全验证的客户端握手
-func Test_clientHandshake_no_auth(t *testing.T) {
-	go func() {
-		if err := server(8444); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{InsecureSkipVerify: true}
-	testClientHandshake(t, config, "127.0.0.1:8444")
-}
-
-func Test_clientHandshake_no_auth_with_sdf(t *testing.T) {
-	go func() {
-		if err := server(8453); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{InsecureSkipVerify: true, CipherDevice: &softwareDeviceAdapter{}, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8453")
-}
-
-func Test_clientHandshake_no_auth_with_server_sdf(t *testing.T) {
-	go func() {
-		if err := serverWithSDF(8454); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8454")
-}
-
-func Test_clientHandshake_no_auth_with_both_sdf(t *testing.T) {
-	go func() {
-		if err := serverWithSDF(8456); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{InsecureSkipVerify: true, CipherSuites: []uint16{ECC_SM4_CBC_SM3}}
-	testClientHandshake(t, config, "127.0.0.1:8456")
-}
-
-// 测试服务端身份认证
-func Test_clientHandshake_auth_server(t *testing.T) {
-	go func() {
-		if err := server(8445); err != nil {
-			panic(err)
-		}
-	}()
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-	// 不匹配的证书
-	pool.AddCert(zjcaRoot)
-
-	time.Sleep(time.Millisecond * 300)
-	config := &Config{RootCAs: pool, Time: runtimeTime}
-	testClientHandshake(t, config, "127.0.0.1:8445")
-}
-
-// 测试双向身份认证
-func Test_clientHandshake_client_auth(t *testing.T) {
-	go func() {
-		if err := serverNeedAuth(8446); err != nil {
-			panic(err)
-		}
-	}()
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{RootCAs: pool, Certificates: []Certificate{authCert}, Time: runtimeTime}
-	testClientHandshake(t, config, "127.0.0.1:8446")
-}
-
-// 测试客户端无证书，服务端要求证书
-func Test_clientHandshake_client_noauth_nocert(t *testing.T) {
-	go func() {
-		if err := serverNeedAuth(8447); err != nil {
-			if err.Error() != "tlcp: client didn't provide a certificate" {
-				t.Errorf("%v\n", err)
-			}
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{InsecureSkipVerify: true}
-	conn, err := Dial("tcp", "127.0.0.1:8447", config)
-	if err != nil && err.Error() != "remote error: tlcp: bad certificate" {
-		t.Fatal(err)
-	}
-
-	if err == nil {
-		conn.Close()
-	}
-}
-
-// 测试客户端无证书，服务端要求证书
-func Test_clientHandshake_client_nocert(t *testing.T) {
-	go func() {
-		if err := serverNeedAuth(8449); err != nil {
-			if err.Error() != "tlcp: client didn't provide a certificate" {
-				t.Errorf("%v\n", err)
-			}
-		}
-	}()
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-
-	time.Sleep(time.Millisecond * 300)
-
-	config := &Config{RootCAs: pool, Time: runtimeTime}
-	conn, err := Dial("tcp", "127.0.0.1:8449", config)
-	if err != nil && err.Error() != "remote error: tlcp: bad certificate" {
-		t.Fatal(err)
-	}
-
-	if err == nil {
-		conn.Close()
-	}
-}
-
-// 测试握手重用
-func Test_resumedSession(t *testing.T) {
-	go func() {
-		if err := serverResumeSession(8448); err != nil {
-			panic(err)
-		}
-	}()
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-	time.Sleep(time.Millisecond * 300)
-	config := &Config{RootCAs: pool, SessionCache: NewLRUSessionCache(2), Time: runtimeTime}
-
-	buff := make([]byte, 1024)
-	for i := 0; i < 2; i++ {
-		conn, err := Dial("tcp", "127.0.0.1:8448", config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer conn.Close()
-		err = conn.Handshake()
-		if err != nil {
-			t.Fatal(err)
-		}
-		n, err := conn.Read(buff)
-		if err != nil && err != io.EOF {
-			t.Fatal(err)
-		}
-		peerCertificates := conn.PeerCertificates()
-		if len(peerCertificates) < 2 {
-			t.Fatal("peerCertificates no found, it should be 2 (sig cert,enc cert)")
-		}
-		fmt.Printf(">> %02X\n", buff[:n])
-	}
-}
-
-func Test_clientHandshake_ECDHE(t *testing.T) {
-	go func() {
-		if err := server(8451, ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-
-	config := &Config{
-		RootCAs:      pool,
-		Certificates: []Certificate{authCert, authCert},
-		CipherSuites: []uint16{ECDHE_SM4_GCM_SM3, ECDHE_SM4_CBC_SM3},
-		Time:         runtimeTime,
-	}
-	testClientHandshake(t, config, "127.0.0.1:8451")
-
-	config.ClientECDHEParamsAsVector = true
-	testClientHandshake(t, config, "127.0.0.1:8451")
-}
-
-func testClientHandshake(t *testing.T, config *Config, addr string) {
-	conn, err := Dial("tcp", addr, config)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if err = conn.Handshake(); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// 测试握手重用
-func Test_NotResumedSession(t *testing.T) {
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-	errCh := make(chan error, 1)
-	go func() {
-		var err error
-		tcpLn, err := net.Listen("tcp", fmt.Sprintf(":%d", 20099))
-		if err != nil {
-			errCh <- err
-			return
-		}
-		defer tcpLn.Close()
-		config := &Config{
-			ClientCAs:    pool,
-			ClientAuth:   RequireAndVerifyClientCert,
-			Certificates: []Certificate{sigCert, encCert},
-			Time:         runtimeTime,
-		}
-		for {
-			conn, err := tcpLn.Accept()
-			if err != nil {
-				errCh <- err
-				return
-			}
-
-			tlcpConn := Server(conn, config)
-			err = tlcpConn.Handshake()
-			if err != nil {
-				_ = conn.Close()
-				errCh <- err
-				return
-			}
-			_ = tlcpConn.Close()
-		}
-	}()
-
-	select {
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-time.After(time.Millisecond * 300):
-	}
-
-	config := &Config{
-		RootCAs:      pool,
-		Certificates: []Certificate{authCert},
-		SessionCache: NewLRUSessionCache(2),
-		Time:         runtimeTime,
-	}
-
-	for i := 0; i < 2; i++ {
-		conn, err := Dial("tcp", "127.0.0.1:20099", config)
-		if err != nil {
-			t.Fatal(err)
-		}
-		err = conn.Handshake()
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		if !conn.IsClient() {
-			t.Fatalf("Expect client connection type, but not")
-		}
-		if len(conn.PeerCertificates()) == 0 {
-			t.Fatalf("Expect get peer cert, but not")
-		}
-		if conn.didResume {
-			t.Fatalf("Expect disable resume, but not")
-		}
-		_ = conn.Close()
-	}
-}
-
-// ECC 套件下客户端传输双证书
-func Test_clientHandshake_ECCWithEncCert(t *testing.T) {
-	go func() {
-		if err := serverNeedAuth(8452); err != nil {
-			panic(err)
-		}
-	}()
-	time.Sleep(time.Millisecond * 300)
-	pool := smx509.NewCertPool()
-	pool.AddCert(root1)
-
-	config := &Config{
-		RootCAs:      pool,
-		Certificates: []Certificate{authCert, authCert},
-		CipherSuites: []uint16{ECC_SM4_GCM_SM3, ECC_SM4_CBC_SM3},
-		Time:         runtimeTime,
-	}
-	testClientHandshake(t, config, "127.0.0.1:8452")
 }
